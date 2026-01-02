@@ -1,191 +1,235 @@
-# Arduino Nano RFID Reader – Hardware Emulation Guide
+# RFID Hardware Emulator – Arduino Nano
 
 ## Overview
 
-This project turns an **Arduino Nano** into a device that behaves like a **real commercial RFID reader**. The goal is not just to read RFID cards, but to *emulate the behavior* of professional RFID hardware so that a **computer or web application believes it is talking to a real device**.
+This project turns an **Arduino Nano** into a fully functional **RFID reader/writer device** that behaves like a real commercial RFID hardware unit.
 
-This is achieved through:
+Instead of acting like a simple Arduino sketch, the firmware exposes a **strict serial protocol** that allows desktop or web applications to communicate with it as if it were professional RFID hardware.
 
-* A strict serial communication protocol
-* Deterministic command → response behavior
-* Controlled RFID access logic
-* Minimal, predictable output
+The system was designed for access control, check‑in / check‑out systems, and secure identity workflows.
 
 ---
 
-## Core Idea
+## Core Concept
 
-Real RFID readers are not magical. They are:
+The Arduino:
 
-* Microcontrollers
-* With firmware
-* Exposing a serial interface
-* That respond to commands in a predictable format
+* Listens for commands over **USB Serial**
+* Executes RFID operations deterministically
+* Responds with strict, machine‑readable replies
+* Controls all RFID logic internally
+* Provides real‑time visual feedback on a **0.96" OLED display**
 
-Your Arduino is doing exactly the same thing.
+The computer:
 
----
+* Sends commands
+* Waits for specific responses
+* Never directly controls RFID timing or logic
 
-## System Architecture
-
-```
-┌──────────────────────────┐
-│     Web / Desktop App    │
-│ (Browser / Node / App)   │
-└────────────┬─────────────┘
-             │  USB Serial (text commands)
-             ▼
-┌──────────────────────────┐
-│       Arduino Nano       │
-│  - Command Interpreter   │
-│  - RFID Logic            │
-│  - OLED Feedback         │
-└────────────┬─────────────┘
-             │
-             ▼
-     ┌────────────────┐
-     │   RFID Card     │
-     └────────────────┘
-```
-
-The computer never talks directly to the RFID chip — it only talks to the Arduino.
+This mirrors how professional RFID readers operate.
 
 ---
 
-## How the Arduino Pretends to Be RFID Hardware
+## Hardware Used
 
-### 1. USB Serial Identity
+* Arduino Nano (ATmega328P)
+* MFRC522 RFID reader
+* 0.96" OLED (I2C, 128x64)
+* MIFARE Classic cards
 
-When the Arduino starts, it opens a serial connection:
+---
 
-```cpp
-Serial.begin(9600);
+## Communication Protocol
+
+All communication happens over **Serial (USB)**.
+
+* Baud Rate: **9600**
+* Line ending: `\n`
+* Commands are case‑sensitive
+
+---
+
+## Supported Commands
+
+### 1. Identify Hardware
+
+**Command**
+
+```
+IDENT
 ```
 
-To the operating system, this looks identical to a USB RFID reader.
-
-The Arduino immediately identifies itself:
+**Response**
 
 ```
 HW:PRISHTINA_RFID_V1
 ```
 
-This is how the software confirms it is talking to the correct device.
+Used by the software to confirm the connected device is valid.
 
 ---
 
-### 2. Command-Based Protocol (Critical Part)
+### 2. Scan for Card
 
-Instead of exposing hardware details, the Arduino accepts **simple text commands**.
+**Command**
 
-These commands are intentionally minimal and deterministic.
+```
+SCAN
+```
 
-| Command        | Purpose                     |
-| -------------- | --------------------------- |
-| `IDENT`        | Identify device             |
-| `SCAN`         | Read RFID UID               |
-| `WRITE:<DATA>` | Write 16 bytes to card      |
-| `LOCK:<KEY>`   | Logical lock / confirmation |
+**Response**
 
-The Arduino never sends unsolicited data.
+```
+UID:XXXXXXXX
+```
+
+Reads the UID of the card currently on the reader.
 
 ---
 
-### 3. How the Card Is Read
+### 3. Write Data (Assignment Mode)
 
-Internally, the Arduino:
-
-1. Checks if a card is present
-2. Reads the UID from the MFRC522 chip
-3. Converts bytes → hex string
-4. Sends formatted response
-
-Example:
+**Command**
 
 ```
-UID:04A1B2C3D4
+WRITE:<jwt_payload>
 ```
 
-The computer does not need to understand RFID — only text.
-
----
-
-### 4. Writing to the Card
-
-When the computer sends:
-
-```
-WRITE:HELLO123
-```
-
-The Arduino:
-
-1. Authenticates the card
-2. Writes 16 bytes to a fixed block
-3. Confirms success or failure
-
-Response:
+**Response**
 
 ```
 WRITE_OK
 ```
 
-This mirrors how professional RFID encoders behave.
+Writes encrypted data into the RFID card (Sector 1, Block 4).
 
 ---
 
-## OLED Display (Human Feedback Layer)
+### 4. Lock Card
 
-The OLED is not part of the protocol — it is for humans.
+**Command**
 
-It shows:
+```
+LOCK:<secret>
+```
 
-* Current state
-* Card detected
-* Write success or failure
+**Response**
 
-To stay stable on Arduino Nano:
+```
+LOCK_OK
+```
 
-* Uses `U8X8lib` (character mode)
-* No frame buffer
-* Updates only when text changes
-
-This prevents flicker and memory crashes.
+Locks the card by modifying sector trailer access bits, preventing further unauthorized writes.
 
 ---
 
-## Why This Works Reliably
+### 5. Unlock Card
 
+**Command**
+
+```
+UNLOCK:<secret>
+```
+
+**Response**
+
+```
+UNLOCK_OK
+```
+
+Authenticates using the protected key and re-enables modification access.
+
+---
+
+### 6. Wipe Card
+
+**Command**
+
+```
+WIPE
+```
+
+**Response**
+
+```
+WIPE_OK
+```
+
+Clears stored data from the target sector.
+
+---
+
+## RFID Memory Layout
+
+MIFARE Classic 1K layout:
+
+* Sector 1 used for data
+* Block 4–6 → Data
+* Block 7 → Sector trailer (keys + permissions)
+
+This ensures safe separation between identity data and security controls.
+
+---
+
+## Security Model
+
+* Default Key A is used for authentication
+* Custom Key B is written during LOCK
+* After locking, write access is denied unless UNLOCK is performed
+
+This simulates professional RFID access control systems.
+
+---
+
+## OLED Display Behavior
+
+The OLED reflects internal device state:
+
+* `RFID READY` – idle
+* `CARD DETECTED` – card present
+* `WRITE OK` – data written
+* `LOCKED` – card locked
+* `ERROR` – operation failed
+
+This allows debugging without a computer.
+
+---
+
+## Why This Exists
+
+This project was created to prototype and test an access‑control system without owning commercial RFID hardware. The Arduino is transformed into a deterministic device that behaves exactly like real readers used in production systems.
+
+The design prioritizes:
+
+* Stability
+* Predictable behavior
+* Clear communication protocol
+* Low memory usage (fits in 2KB SRAM)
+
+---
+
+## Notes
+
+* Designed for Arduino Nano / ATmega328P
 * No dynamic memory allocation
-* Minimal global variables
-* Deterministic command processing
-* No background loops or delays
-* Serial protocol only
-
-This makes behavior predictable and safe for production use.
-
----
-
-## Mental Model (Important)
-
-Think of the Arduino as a **tiny server**:
-
-* The PC sends a request
-* The Arduino performs a physical action
-* The Arduino returns a result
-
-Nothing more.
-
-That is exactly how commercial RFID readers operate.
+* Safe for long‑running sessions
+* Suitable for real integrations
 
 ---
 
 ## Summary
 
-✔ Arduino behaves like real RFID hardware
-✔ Clean, command-based interface
-✔ Stable on low-memory devices
-✔ Compatible with web & desktop apps
-✔ Easy to extend and debug
+This project turns a simple Arduino into a full RFID hardware emulator with defined protocol, state control, and security behavior — suitable for real-world integration and testing.
 
-This is not a hack — it is a proper device abstraction.
+---
+
+If you are extending this:
+
+* Add CRC or checksum validation
+* Add multi-block writes
+* Add challenge–response authentication
+* Add UID whitelisting
+
+---
+
+End of documentation.
