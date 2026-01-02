@@ -5,21 +5,34 @@
 #define SS_PIN 10
 #define RST_PIN 9
 
-MFRC522 rfid(SS_PIN, RST_PIN);
-MFRC522::MIFARE_Key key;
+#define DEVICE_NAME "PRISHTINA_RFID_V1"
+#define BAUD_RATE 9600
 
-// Use U8x8 for low RAM usage
+MFRC522 rfid(SS_PIN, RST_PIN);
+MFRC522::MIFARE_Key keyA;
+MFRC522::MIFARE_Key keyB;
+
 U8X8_SSD1306_128X64_NONAME_HW_I2C oled(U8X8_PIN_NONE);
 
-// ---------------- CONFIG ----------------
-#define DEVICE_NAME "PRISHTINA_RFID_V1"
-
-// ---------------- STATE ----------------
 String lastUID = "";
-String lastDisplay[3] = {"", "", ""};
+bool cardPresent = false;
 
-// ---------------- UTILS ----------------
-String getUID() {
+// ================= OLED =================
+void show(String l1, String l2 = "", String l3 = "") {
+  oled.clearDisplay();
+  oled.setCursor(0, 0); oled.print(l1);
+  oled.setCursor(0, 1); oled.print(l2);
+  oled.setCursor(0, 2); oled.print(l3);
+}
+
+// ================= CARD UTILS =================
+bool waitForCard() {
+  if (!rfid.PICC_IsNewCardPresent()) return false;
+  if (!rfid.PICC_ReadCardSerial()) return false;
+  return true;
+}
+
+String readUID() {
   String uid = "";
   for (byte i = 0; i < rfid.uid.size; i++) {
     if (rfid.uid.uidByte[i] < 0x10) uid += "0";
@@ -29,125 +42,146 @@ String getUID() {
   return uid;
 }
 
-bool cardAvailable() {
-  if (!rfid.PICC_IsNewCardPresent()) return false;
-  if (!rfid.PICC_ReadCardSerial()) return false;
-  return true;
-}
-
 void haltCard() {
   rfid.PICC_HaltA();
   rfid.PCD_StopCrypto1();
 }
 
-// ---------------- OLED DISPLAY ----------------
-void showOLED(String line1, String line2 = "", String line3 = "") {
-  // Truncate lines to 16 chars
-  if (line1.length() > 16) line1 = line1.substring(0, 16);
-  if (line2.length() > 16) line2 = line2.substring(0, 16);
-  if (line3.length() > 16) line3 = line3.substring(0, 16);
+// ================= RFID WRITE =================
+bool writeBlock(byte block, byte* data) {
+  MFRC522::StatusCode status;
 
-  // Only redraw if any line changed
-  if (line1 == lastDisplay[0] && line2 == lastDisplay[1] && line3 == lastDisplay[2]) return;
+  status = rfid.PCD_Authenticate(
+    MFRC522::PICC_CMD_MF_AUTH_KEY_A,
+    block,
+    &keyA,
+    &rfid.uid
+  );
 
-  lastDisplay[0] = line1;
-  lastDisplay[1] = line2;
-  lastDisplay[2] = line3;
+  if (status != MFRC522::STATUS_OK) return false;
 
-  oled.clearDisplay();
-  oled.setCursor(0, 0); oled.print(line1);
-  oled.setCursor(0, 1); oled.print(line2);
-  oled.setCursor(0, 2); oled.print(line3);
+  status = rfid.MIFARE_Write(block, data, 16);
+  return status == MFRC522::STATUS_OK;
 }
 
-// ---------------- SETUP ----------------
+// ================= SETUP =================
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(BAUD_RATE);
   SPI.begin();
   rfid.PCD_Init();
-
-  for (byte i = 0; i < 6; i++) key.keyByte[i] = 0xFF;
 
   oled.begin();
   oled.setPowerSave(0);
   oled.setFont(u8x8_font_chroma48medium8_r);
 
-  showOLED("RFID READY", "Waiting...");
+  for (byte i = 0; i < 6; i++) {
+    keyA.keyByte[i] = 0xFF;   // default factory key
+    keyB.keyByte[i] = 0xA0;   // custom lock key
+  }
+
+  show("RFID READY", "Waiting...");
   Serial.println("HW:" DEVICE_NAME);
 }
 
-// ---------------- LOOP ----------------
+// ================= MAIN LOOP =================
 void loop() {
-  // ----- Auto-detect card -----
-  if (cardAvailable()) {
-    lastUID = getUID();
-    Serial.print("UID:");
-    Serial.println(lastUID);
-    showOLED("CARD DETECTED", lastUID);
-    haltCard();
-  }
 
-  // ----- Handle Serial commands -----
+  // --------- SERIAL COMMANDS ----------
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
 
+    // IDENT
     if (cmd == "IDENT") {
       Serial.println("HW:" DEVICE_NAME);
+      return;
     }
-    else if (cmd.startsWith("WRITE:")) {
-      String payload = cmd.substring(6);
 
-      if (!cardAvailable()) {
+    // SCAN
+    if (cmd == "SCAN") {
+      show("SCAN", "Waiting card");
+      if (!waitForCard()) {
         Serial.println("ERROR:NO_CARD");
-        showOLED("WRITE FAIL", "No card");
         return;
       }
 
-      byte data[16];
-      for (int i = 0; i < 16; i++) {
-        data[i] = (i < payload.length()) ? payload[i] : 0x20;
+      lastUID = readUID();
+      Serial.print("UID:");
+      Serial.println(lastUID);
+      show("CARD OK", lastUID);
+      haltCard();
+      return;
+    }
+
+    // WRITE
+    if (cmd.startsWith("WRITE:")) {
+      String payload = cmd.substring(6);
+
+      if (!waitForCard()) {
+        Serial.println("ERROR:NO_CARD");
+        return;
       }
 
-      MFRC522::StatusCode status = rfid.PCD_Authenticate(
-        MFRC522::PICC_CMD_MF_AUTH_KEY_A, 4, &key, &rfid.uid
-      );
+      byte buffer[16];
+      memset(buffer, 0x20, 16);
+      for (int i = 0; i < payload.length() && i < 16; i++) {
+        buffer[i] = payload[i];
+      }
 
-      if (status != MFRC522::STATUS_OK) {
-        Serial.println("ERROR:AUTH");
-        showOLED("WRITE FAIL", "Auth error");
+      if (!writeBlock(4, buffer)) {
+        Serial.println("ERROR:WRITE");
         haltCard();
         return;
       }
 
-      if (rfid.MIFARE_Write(4, data, 16) == MFRC522::STATUS_OK) {
-        Serial.println("WRITE_OK");
-        showOLED("WRITE OK");
+      Serial.println("WRITE_OK");
+      show("WRITE OK");
+      haltCard();
+      return;
+    }
+
+    // LOCK
+    if (cmd.startsWith("LOCK:")) {
+      if (!waitForCard()) {
+        Serial.println("ERROR:NO_CARD");
+        return;
+      }
+
+      // Sector trailer block = 7
+      byte trailer[16] = {
+        0xA0,0xA0,0xA0,0xA0,0xA0,0xA0,
+        0xFF,0x07,0x80,0x69,
+        0xA0,0xA0,0xA0,0xA0,0xA0,0xA0
+      };
+
+      if (writeBlock(7, trailer)) {
+        Serial.println("LOCK_OK");
+        show("LOCKED");
       } else {
-        Serial.println("ERROR:WRITE");
-        showOLED("WRITE FAIL");
+        Serial.println("ERROR:LOCK");
       }
 
       haltCard();
+      return;
     }
-    else if (cmd.startsWith("LOCK:")) {
-      Serial.println("LOCK_OK");
-      showOLED("LOCKED");
-    }
-    else if (cmd == "SCAN") {
-      if (cardAvailable()) {
-        lastUID = getUID();
-        Serial.print("UID:");
-        Serial.println(lastUID);
-        showOLED("CARD DETECTED", lastUID);
-        haltCard();
-      } else {
+
+    // WIPE
+    if (cmd == "WIPE") {
+      if (!waitForCard()) {
         Serial.println("ERROR:NO_CARD");
-        showOLED("No card");
+        return;
       }
+
+      byte empty[16];
+      memset(empty, 0x00, 16);
+      writeBlock(4, empty);
+
+      Serial.println("WIPE_OK");
+      show("WIPE OK");
+      haltCard();
+      return;
     }
-    else {
-      Serial.println("ERROR:UNKNOWN_CMD");
-    }
+
+    Serial.println("ERROR:UNKNOWN_CMD");
   }
 }
